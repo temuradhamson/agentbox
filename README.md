@@ -1,52 +1,52 @@
 # Agent Hub
 
-Real-time web interface for AI coding agents (Claude Code, Codex, Qwen Code) running inside [AI Agent Box](https://github.com/Yakvenalex/LLMConsoleProject) Docker container.
+Веб-интерфейс реального времени для AI-агентов (Claude Code, Codex, Qwen Code), работающих внутри Docker-контейнера [AI Agent Box](https://github.com/Yakvenalex/LLMConsoleProject).
 
-**Agent Hub** is a standalone frontend that connects to Agent Box and provides:
-- Chat mode with structured messages (parsed from terminal output)
-- Terminal mode with xterm.js
-- TTS auto-playback with Telegram-style audio player
-- Voice input via ASR
-- Session management
+**Agent Hub** — отдельный фронтенд, который подключается к Agent Box и предоставляет:
+- Режим чата со структурированными сообщениями (парсинг терминального вывода)
+- Режим терминала с xterm.js
+- Автовоспроизведение TTS с аудиоплеером в стиле Telegram
+- Голосовой ввод через ASR
+- Управление сессиями
 
-## Architecture
+## Архитектура
 
 ```
-Browser (Agent Hub frontend, Nuxt 3)
+Браузер (Agent Hub frontend, Nuxt 3)
   |
   |-- REST /api/* --> Agent Hub backend (FastAPI) --> Agent Box (Docker)
   |-- WS /ws/terminal/* --> Agent Hub backend --> Agent Box /ws/terminal/*
-  |-- WS direct --> Agent Box /ws/tts (TTS audio stream)
+  |-- WS напрямую --> Agent Box /ws/tts (аудиопоток TTS)
 ```
 
-Agent Hub **does not modify** Agent Box. It connects to it via HTTP API and WebSocket as a client.
+Agent Hub **не модифицирует** Agent Box. Он подключается к нему по HTTP API и WebSocket как клиент.
 
-## Prerequisites
+## Требования
 
-**[AI Agent Box](https://github.com/Yakvenalex/LLMConsoleProject)** must be running. Follow its README to set up:
+Должен быть запущен **[AI Agent Box](https://github.com/Yakvenalex/LLMConsoleProject)** (проект Алексея). Установка по его README:
 
 ```bash
-# Clone Alexey's project
+# Клонировать проект Алексея
 git clone https://github.com/Yakvenalex/LLMConsoleProject.git
 cd LLMConsoleProject
 
-# Configure
+# Настроить
 cp .env.example .env
-# Edit .env: set WORKSPACE, API keys, AUTH_LOGIN, AUTH_PASSWORD, etc.
+# Отредактировать .env: WORKSPACE, API-ключи, AUTH_LOGIN, AUTH_PASSWORD и т.д.
 
-# Build and start (requires Docker + WSL on Windows)
+# Собрать и запустить (нужен Docker + WSL на Windows)
 make build
 make start
 
-# Verify it's running
+# Проверить
 curl http://localhost:8922/health
 ```
 
-Default Agent Box port: **8922** (configurable via `PORT` in `.env`).
+Порт Agent Box по умолчанию: **8922** (настраивается через `PORT` в `.env`).
 
-## Setup Agent Hub
+## Установка Agent Hub
 
-### 1. Backend
+### 1. Бэкенд
 
 ```bash
 cd backend
@@ -58,22 +58,22 @@ venv\Scripts\pip install -r requirements.txt
 # Linux/Mac
 venv/bin/pip install -r requirements.txt
 
-# Configure
+# Настроить
 cp .env.example .env
 ```
 
-Edit `backend/.env`:
+Отредактировать `backend/.env`:
 
 ```env
-AGENT_BOX_URL=http://localhost:8922   # Agent Box address
-SECRET_KEY=your-random-secret-here    # JWT secret (any random string)
-AB_LOGIN=admin                        # Same as AUTH_LOGIN in Agent Box .env
-AB_PASSWORD=admin123                  # Same as AUTH_PASSWORD in Agent Box .env
+AGENT_BOX_URL=http://localhost:8922   # Адрес Agent Box
+SECRET_KEY=ваш-случайный-секрет      # JWT-секрет (любая случайная строка)
+AB_LOGIN=admin                        # Совпадает с AUTH_LOGIN в .env Agent Box
+AB_PASSWORD=admin123                  # Совпадает с AUTH_PASSWORD в .env Agent Box
 ```
 
-**Important:** `AB_LOGIN` and `AB_PASSWORD` must match Agent Box's `AUTH_LOGIN` and `AUTH_PASSWORD`.
+**Важно:** `AB_LOGIN` и `AB_PASSWORD` должны совпадать с `AUTH_LOGIN` и `AUTH_PASSWORD` в конфиге Agent Box.
 
-Start the backend:
+Запустить бэкенд:
 
 ```bash
 # Windows
@@ -83,7 +83,7 @@ venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8924
 venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8924
 ```
 
-### 2. Frontend
+### 2. Фронтенд
 
 ```bash
 cd frontend
@@ -91,59 +91,59 @@ npm install
 npx nuxi dev --port 3005
 ```
 
-Open **http://localhost:3005** and login with Agent Box credentials.
+Открыть **http://localhost:3005** и войти с учётными данными Agent Box.
 
-## Connecting to Agent Box
+## Связь с Agent Box
 
-Agent Hub connects to Agent Box via three channels:
+Agent Hub подключается к Agent Box по трём каналам:
 
-| Channel | Direction | Purpose |
-|---------|-----------|---------|
-| REST API (via backend proxy) | Hub --> Agent Box | Session CRUD, send text, ASR, tail output |
-| Terminal WebSocket (via backend proxy) | Hub <--> Agent Box | xterm.js live terminal |
-| TTS WebSocket (direct from browser) | Hub <-- Agent Box | Real-time audio playback |
+| Канал | Направление | Назначение |
+|-------|-------------|------------|
+| REST API (через прокси бэкенда) | Hub --> Agent Box | CRUD сессий, отправка текста, ASR, tail вывода |
+| Terminal WebSocket (через прокси) | Hub <--> Agent Box | Живой терминал xterm.js |
+| TTS WebSocket (напрямую из браузера) | Hub <-- Agent Box | Воспроизведение озвучки в реальном времени |
 
-### How it works
+### Как это работает
 
-1. **Login**: Agent Hub backend authenticates with Agent Box using `AB_LOGIN`/`AB_PASSWORD` and caches the token
-2. **Sessions**: Lists/creates/deletes sessions via Agent Box `/sessions` API
-3. **Chat mode**: Fetches terminal output via `/sessions/{id}/tail`, parses markers (`❯` = user, `●` = assistant, `⎿` = tool result) into structured messages
-4. **Terminal mode**: Bidirectional WebSocket proxy to Agent Box terminal
-5. **TTS**: Browser connects directly to Agent Box `/ws/tts` for zero-latency audio playback
-6. **ASR**: Audio recording sent through backend proxy to Agent Box `/asr` endpoint
+1. **Логин**: бэкенд Agent Hub аутентифицируется в Agent Box через `AB_LOGIN`/`AB_PASSWORD` и кэширует токен
+2. **Сессии**: список/создание/удаление через Agent Box API `/sessions`
+3. **Режим чата**: получает вывод терминала через `/sessions/{id}/tail`, парсит маркеры (`❯` = пользователь, `●` = ассистент, `⎿` = результат инструмента) в структурированные сообщения
+4. **Режим терминала**: двунаправленный WebSocket-прокси к терминалу Agent Box
+5. **TTS**: браузер подключается напрямую к Agent Box `/ws/tts` для воспроизведения без задержек
+6. **ASR**: аудиозапись отправляется через прокси бэкенда на Agent Box `/asr`
 
-### Agent Box TTS setup
+### Настройка озвучки (TTS)
 
-For voice output to work, the agent inside Agent Box needs a TTS MCP server configured. See Agent Box README for details on:
-- Setting `TTS_VOICE` in `.env` (e.g., `kseniya`, `aidar`)
-- Copying TTS instruction files (`CLAUDE.md`, `AGENTS.md`, `QWEN.md`) to your workspace
+Для работы голосового вывода агенту внутри Agent Box нужен настроенный TTS MCP-сервер. Подробности в README Agent Box:
+- Установить `TTS_VOICE` в `.env` (например, `kseniya`, `aidar`)
+- Скопировать файлы инструкций (`CLAUDE.md`, `AGENTS.md`, `QWEN.md`) в workspace
 
-## Port Summary
+## Порты
 
-| Service | Port | Description |
-|---------|------|-------------|
-| Agent Box | 8922 | Docker container with AI agent terminals |
-| Agent Hub backend | 8924 | FastAPI proxy + parser |
-| Agent Hub frontend | 3005 | Nuxt 3 dev server |
+| Сервис | Порт | Описание |
+|--------|------|----------|
+| Agent Box | 8922 | Docker-контейнер с терминалами AI-агентов |
+| Agent Hub бэкенд | 8924 | FastAPI прокси + парсер |
+| Agent Hub фронтенд | 3005 | Nuxt 3 dev-сервер |
 
-## Features
+## Возможности
 
-- **Two view modes**: Chat (structured messages) / Terminal (xterm.js)
-- **TTS auto-play**: Preloading queue, Auto/Mute toggle
-- **Voice input**: Record + transcribe + send to agent
-- **Audio player**: Telegram-style waveform, seek, play/pause
-- **Terminal toolbar**: Ctrl+C, Ctrl+D, Ctrl+Z, Esc, Tab, Shift+Tab, arrows
-- **Timestamps**: Real-time on new messages, day grouping
-- **Session management**: Create, switch, delete, activity tracking
-- **Preferences**: Mode, sidebar state, active session saved in localStorage
-- **Noise filtering**: Parser strips terminal UI artifacts (decorative lines, bypass prompts, etc.)
+- **Два режима**: Чат (структурированные сообщения) / Терминал (xterm.js)
+- **Автоозвучка TTS**: очередь с предзагрузкой, переключатель Auto/Mute
+- **Голосовой ввод**: запись + транскрибация + отправка агенту, визуализатор уровня
+- **Аудиоплеер**: в стиле Telegram — волноформа, перемотка, play/pause, длительность
+- **Панель терминала**: Ctrl+C, Ctrl+D, Ctrl+Z, Esc, Tab, Shift+Tab, стрелки, микрофон
+- **Метки времени**: реальное время на новых сообщениях, группировка по дням
+- **Управление сессиями**: создание, переключение, удаление, отслеживание активности
+- **Сохранение настроек**: режим, сайдбар, активная сессия — всё в localStorage
+- **Фильтрация мусора**: парсер убирает артефакты терминала (декоративные линии, bypass-промпты и т.д.)
 
-## Tech Stack
+## Стек технологий
 
-- **Frontend**: Nuxt 3, Vue 3, Tailwind CSS 3, Pinia, xterm.js
-- **Backend**: FastAPI, httpx, websockets, python-jose
+- **Фронтенд**: Nuxt 3, Vue 3, Tailwind CSS 3, Pinia, xterm.js
+- **Бэкенд**: FastAPI, httpx, websockets, python-jose
 - **Agent Box**: [Yakvenalex/LLMConsoleProject](https://github.com/Yakvenalex/LLMConsoleProject) (FastAPI + tmux + Docker)
 
-## License
+## Лицензия
 
 MIT
