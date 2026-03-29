@@ -8,7 +8,7 @@ export default defineNuxtConfig({
     head: {
       title: 'Agent Hub',
       meta: [
-        { name: 'viewport', content: 'width=device-width, initial-scale=1, maximum-scale=1' },
+        { name: 'viewport', content: 'width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover' },
       ],
       link: [
         { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
@@ -30,5 +30,11 @@ export default defineNuxtConfig({
 
   tailwindcss: {
     cssPath: '~/assets/css/main.css',
+  },
+
+  vite: {
+    server: {
+      allowedHosts: ['llm.2big.uz'],
+    },
   },
 })

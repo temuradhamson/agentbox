@@ -7,6 +7,51 @@ definePageMeta({ middleware: 'auth' })
 const auth = useAuthStore()
 const sessions = useSessionsStore()
 const chat = useChatStore()
+
+// Scroll-to-bottom button
+const chatScroll = ref<HTMLElement | null>(null)
+const showScrollBtn = ref(false)
+
+function onChatScroll() {
+  const el = chatScroll.value
+  if (!el) return
+  showScrollBtn.value = el.scrollHeight - el.scrollTop - el.clientHeight > el.clientHeight
+}
+
+function scrollToBottom(smooth = true) {
+  const el = chatScroll.value
+  if (!el) return
+  el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'instant' })
+}
+
+// Swipe to open sidebar (mobile)
+let touchStartX = 0
+let touchStartY = 0
+let swiping = false
+
+function onTouchStart(e: TouchEvent) {
+  const x = e.touches[0].clientX
+  // Ignore touches from the very left 20px (iOS back gesture zone)
+  if (x < 20) return
+  touchStartX = x
+  touchStartY = e.touches[0].clientY
+  swiping = true
+}
+
+function onTouchEnd(e: TouchEvent) {
+  if (!swiping) return
+  swiping = false
+  const dx = e.changedTouches[0].clientX - touchStartX
+  const dy = Math.abs(e.changedTouches[0].clientY - touchStartY)
+  // Horizontal swipe > 60px, more horizontal than vertical
+  if (dx > 60 && dx > dy) {
+    sidebarOpen.value = true
+  }
+  // Swipe left to close sidebar
+  if (dx < -60 && -dx > dy && sidebarOpen.value) {
+    sidebarOpen.value = false
+  }
+}
 const mode = ref<'chat' | 'terminal'>((localStorage.getItem('ah_mode') as any) || 'chat')
 const sidebarOpen = ref(localStorage.getItem('ah_sidebar') !== 'false')
 const autoTts = ref(localStorage.getItem('ah_autotts') !== 'false')
@@ -253,6 +298,15 @@ async function loadMessages(id: string) {
     }
 
     chat.setMessages(data.messages)
+    // Auto-scroll to bottom on new messages (only if already near bottom)
+    await nextTick()
+    const el = chatScroll.value
+    if (el) {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < el.clientHeight
+      if (nearBottom || _initialLoad) {
+        el.scrollTo({ top: el.scrollHeight, behavior: 'instant' })
+      }
+    }
   } catch {}
 }
 
@@ -277,6 +331,8 @@ watch(() => sessions.activeId, async (id, oldId) => {
   await loadMessages(id)
   markExistingAudio(chat.messages)
   _initialLoad = false
+  await nextTick()
+  scrollToBottom(false)
   pollTimer = setInterval(() => loadMessages(id), 3000)
 })
 
@@ -313,6 +369,17 @@ const showNewSession = ref(false)
 const newId = ref('')
 const newCli = ref('claude')
 
+function confirmDelete(id: string) {
+  if (confirm(`Delete session "${id}"?`)) {
+    sessions.remove(id)
+  }
+}
+
+function selectSession(id: string) {
+  sessions.setActive(id)
+  if (window.innerWidth < 768) sidebarOpen.value = false
+}
+
 async function createSession() {
   if (!newId.value) return
   try {
@@ -327,10 +394,17 @@ async function createSession() {
 </script>
 
 <template>
-  <div class="h-screen flex bg-surface-950">
-    <!-- Sidebar -->
+  <div class="h-[100dvh] flex bg-surface-950 overflow-hidden" @touchstart="onTouchStart" @touchend="onTouchEnd">
+    <!-- Mobile overlay backdrop -->
+    <transition name="fade">
+      <div v-if="sidebarOpen" class="md:hidden fixed inset-0 bg-black/50 z-40" @click="sidebarOpen = false" />
+    </transition>
+
+    <!-- Sidebar: overlay on mobile, inline on desktop -->
     <aside :class="[
-        'flex-shrink-0 bg-surface-900 border-r border-surface-700 flex flex-col transition-all duration-200 overflow-hidden',
+        'bg-surface-900 border-r border-surface-700 flex flex-col transition-all duration-200 overflow-hidden',
+        'max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:shadow-2xl',
+        'md:flex-shrink-0',
         sidebarOpen ? 'w-72' : 'w-0 border-r-0'
       ]">
       <div class="w-72 h-full flex flex-col">
@@ -354,9 +428,9 @@ async function createSession() {
         <!-- Sessions list -->
         <div class="flex-1 overflow-y-auto p-2 space-y-1">
           <div v-for="s in sessions.sessions" :key="s.id"
-            @click="sessions.setActive(s.id)"
+            @click="selectSession(s.id)"
             :class="[
-              'px-3 py-2.5 rounded-lg cursor-pointer transition-all text-sm',
+              'group px-3 py-2.5 rounded-lg cursor-pointer transition-all text-sm',
               sessions.activeId === s.id
                 ? 'bg-accent/10 border border-accent/30 text-white'
                 : 'hover:bg-surface-800 text-surface-500 hover:text-white border border-transparent'
@@ -366,7 +440,16 @@ async function createSession() {
                 <span class="w-2 h-2 rounded-full bg-ok flex-shrink-0" />
                 <span class="truncate font-medium">{{ s.id }}</span>
               </div>
-              <span class="text-[10px] text-surface-600 flex-shrink-0">{{ formatRelativeDate(s.last_active) }}</span>
+              <div class="flex items-center gap-1.5 flex-shrink-0">
+                <span class="text-[10px] text-surface-600">{{ formatRelativeDate(s.last_active) }}</span>
+                <button @click.stop="confirmDelete(s.id)"
+                  class="w-5 h-5 rounded flex items-center justify-center text-surface-600 hover:text-danger hover:bg-danger/10 transition opacity-0 group-hover:opacity-100"
+                  title="Delete session">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                  </svg>
+                </button>
+              </div>
             </div>
           </div>
           <p v-if="!sessions.sessions.length" class="text-center text-surface-600 text-xs py-8">
@@ -389,8 +472,9 @@ async function createSession() {
       <!-- Top bar -->
       <div class="h-12 border-b border-surface-700 bg-surface-900 flex items-center justify-between px-4 flex-shrink-0">
         <div class="flex items-center gap-2">
-          <button v-if="!sidebarOpen" @click="sidebarOpen = true"
-            class="w-8 h-8 rounded-lg bg-surface-800 border border-surface-600 hover:bg-surface-700 text-surface-500 hover:text-white flex items-center justify-center transition text-sm">
+          <button @click="sidebarOpen = true"
+            class="w-8 h-8 rounded-lg bg-surface-800 border border-surface-600 hover:bg-surface-700 text-surface-500 hover:text-white flex items-center justify-center transition text-sm"
+            :class="sidebarOpen ? 'max-md:block hidden' : ''">
             ☰
           </button>
           <span class="text-sm font-medium text-white">{{ sessions.activeId || 'Select a session' }}</span>
@@ -402,14 +486,14 @@ async function createSession() {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
             </svg>
-            Chat
+            <span class="max-md:hidden">Chat</span>
           </button>
           <button @click="mode = 'terminal'"
             :class="['px-3 py-1 rounded-md text-xs font-medium transition flex items-center gap-1', mode === 'terminal' ? 'bg-accent text-white' : 'text-surface-500 hover:text-white']">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
             </svg>
-            Terminal
+            <span class="max-md:hidden">Terminal</span>
           </button>
           <button @click="autoTts = !autoTts"
             :class="['px-3 py-1 rounded-md text-xs font-medium transition flex items-center gap-1',
@@ -423,11 +507,7 @@ async function createSession() {
               <line v-if="!autoTts" x1="23" y1="9" x2="17" y2="15"/>
               <line v-if="!autoTts" x1="17" y1="9" x2="23" y2="15"/>
             </svg>
-            {{ autoTts ? 'Auto' : 'Mute' }}
-          </button>
-          <button @click="sessions.remove(sessions.activeId!)"
-            class="ml-1 px-2 py-1 rounded-md text-xs text-danger hover:bg-danger/10 transition">
-            Delete
+            <span class="max-md:hidden">{{ autoTts ? 'Auto' : 'Mute' }}</span>
           </button>
         </div>
       </div>
@@ -443,8 +523,8 @@ async function createSession() {
         </div>
 
         <!-- Chat mode -->
-        <div v-else-if="mode === 'chat'" class="h-full flex flex-col">
-          <div ref="chatScroll" class="flex-1 overflow-y-auto p-4 space-y-3">
+        <div v-else-if="mode === 'chat'" class="h-full flex flex-col relative">
+          <div ref="chatScroll" @scroll="onChatScroll" class="flex-1 overflow-y-auto p-4 space-y-3 relative">
             <template v-for="(msg, i) in chat.messages" :key="i">
               <!-- Day separator (only for messages with real timestamps) -->
               <div v-if="msg.timestamp && (i === 0 || !chat.messages[i-1]?.timestamp || isDifferentDay(chat.messages[i-1].timestamp, msg.timestamp))"
@@ -454,7 +534,7 @@ async function createSession() {
                 </span>
               </div>
 
-              <div :class="['max-w-3xl', msg.role === 'user' ? 'ml-auto' : '']">
+              <div :class="['max-w-3xl max-md:max-w-full min-w-0 break-words overflow-hidden', msg.role === 'user' ? 'ml-auto' : '']">
               <!-- User message -->
               <div v-if="msg.role === 'user' && msg.type === 'text'"
                 class="bg-accent/10 border border-accent/20 rounded-xl px-4 py-2.5 text-sm text-white">
@@ -464,7 +544,7 @@ async function createSession() {
 
               <!-- Assistant text -->
               <div v-else-if="msg.role === 'assistant' && msg.type === 'text'"
-                class="bg-surface-800 border border-surface-700 rounded-xl px-4 py-2.5 text-sm prose">
+                class="bg-surface-800 border border-surface-700 rounded-xl px-4 py-2.5 text-sm prose overflow-hidden">
                 <div v-html="msg.content" />
                 <div v-if="msg.timestamp" class="text-[10px] text-surface-600 text-right mt-1">{{ formatTime(msg.timestamp) }}</div>
               </div>
@@ -482,7 +562,7 @@ async function createSession() {
 
               <!-- Other tool use -->
               <details v-else-if="msg.type === 'tool_use'"
-                class="bg-surface-800/50 border border-surface-700 rounded-lg text-xs">
+                class="bg-surface-800/50 border border-surface-700 rounded-lg text-xs min-w-0">
                 <summary class="px-3 py-2 cursor-pointer text-surface-500 hover:text-white transition">
                   🔧 {{ msg.tool_name }}
                 </summary>
@@ -521,7 +601,7 @@ async function createSession() {
 
               <!-- Tool result (non-audio) -->
               <details v-else-if="msg.type === 'tool_result'"
-                class="bg-surface-800/50 border border-surface-700 rounded-lg text-xs">
+                class="bg-surface-800/50 border border-surface-700 rounded-lg text-xs min-w-0">
                 <summary :class="['px-3 py-2 cursor-pointer transition', msg.is_error ? 'text-danger' : 'text-surface-500 hover:text-white']">
                   {{ msg.is_error ? '❌' : '✅' }} Result
                 </summary>
@@ -538,8 +618,16 @@ async function createSession() {
             </template>
           </div>
 
+          <!-- Scroll to bottom -->
+          <transition name="fade">
+            <button v-if="showScrollBtn" @click="scrollToBottom"
+              class="absolute bottom-20 left-1/2 -translate-x-1/2 z-10 w-10 h-10 rounded-full bg-surface-700 border border-surface-600 text-surface-300 hover:bg-surface-600 hover:text-white flex items-center justify-center shadow-lg transition">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+          </transition>
+
           <!-- Input bar -->
-          <div class="border-t border-surface-700 bg-surface-900 p-3 flex items-center gap-3 flex-shrink-0">
+          <div class="border-t border-surface-700 bg-surface-900 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] flex items-center gap-3 flex-shrink-0">
             <!-- Stop TTS -->
             <button @click="stopAudio()" v-if="ttsPlaying"
               class="w-9 h-9 rounded-full bg-ok/10 border border-ok/30 text-ok flex items-center justify-center text-sm flex-shrink-0">
@@ -846,3 +934,8 @@ async function toggleMic() {
   }
 }
 </script>
+
+<style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity .2s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
