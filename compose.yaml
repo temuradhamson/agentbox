@@ -1,0 +1,26 @@
+services:
+  agentbox:
+    build: .
+    network_mode: host
+    hostname: agentbox
+    restart: unless-stopped
+    environment:
+      - AUTH_LOGIN=${AUTH_LOGIN:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY}
+      - ASR_TOKEN=${ASR_TOKEN}
+      - ASR_NORMALIZE=${ASR_NORMALIZE:-false}
+      - MIND_API_KEY=${MIND_API_KEY}
+      - TTS_VOICE=${TTS_VOICE:-aidar}
+    volumes:
+      - agentbox-data:/data
+      - ${WORKSPACE:-./workspace}:/workspace
+      - ${CLAUDE_CONFIG:-~/.claude-agent}:/home/agent/.claude
+      - ${CODEX_CONFIG:-~/.codex-agent}:/home/agent/.codex
+      - ${QWEN_CONFIG:-~/.qwen-agent}:/home/agent/.qwen
+      # Dev: live-reload backend code
+      - ./backend/app:/app/backend/app
+      - ./entrypoint.sh:/app/entrypoint.sh
+
+volumes:
+  agentbox-data:

@@ -55,7 +55,6 @@ function onTouchEnd(e: TouchEvent) {
 const mode = ref<'chat' | 'terminal'>((localStorage.getItem('ah_mode') as any) || 'chat')
 const sidebarOpen = ref(localStorage.getItem('ah_sidebar') !== 'false')
 const autoTts = ref(localStorage.getItem('ah_autotts') !== 'false')
-
 watch(mode, (v) => {
   localStorage.setItem('ah_mode', v)
   // When switching modes, mark current audio as played so they don't replay
@@ -64,11 +63,9 @@ watch(mode, (v) => {
 watch(sidebarOpen, (v) => localStorage.setItem('ah_sidebar', String(v)))
 watch(autoTts, (v) => localStorage.setItem('ah_autotts', String(v)))
 
-// TTS WebSocket — connects directly to Agent Box (like port 8921 does)
-const abToken = ref('')
+// TTS WebSocket — connects to our own backend
 const ttsWs = useWebSocket(() => {
-  const base = 'ws://localhost:8922'
-  return `${base}/ws/tts?token=${abToken.value}`
+  return `${WS_BASE}/ws/tts?token=${auth.token}`
 })
 
 // TTS audio queue (with preload, matching 8921 implementation)
@@ -255,7 +252,9 @@ watch(() => ttsWs.data.value, (raw) => {
   try {
     const d = JSON.parse(raw)
     if (!d.url) return
+    if (_playedAudioUrls.has(d.url)) return
     if (audioQueue.length >= QUEUE_MAX) return
+    _playedAudioUrls.add(d.url)
     audioQueue.push(d.url)
     if (!currentAudio) playNext(); else preloadNext()
   } catch {}
@@ -338,13 +337,7 @@ watch(() => sessions.activeId, async (id, oldId) => {
 
 onMounted(async () => {
   await sessions.fetch()
-  // Get Agent Box token for direct TTS WS connection
-  try {
-    const api = useApi()
-    const data = await api.get<{ token: string }>('/api/auth/agent-box-token')
-    abToken.value = data.token
-    ttsWs.connect()
-  } catch { console.warn('Could not get Agent Box token for TTS') }
+  ttsWs.connect()
   // Restore last active session, or pick first
   sessions.restoreActive()
   if (sessions.sessions.length && !sessions.activeId) {
@@ -358,16 +351,12 @@ onUnmounted(() => {
   stopAudio()
 })
 
-onUnmounted(() => {
-  chatWs.close()
-  ttsWs.close()
-  stopAudio()
-})
 
 // New session dialog
 const showNewSession = ref(false)
 const newId = ref('')
 const newCli = ref('claude')
+const newResume = ref(false)
 
 function confirmDelete(id: string) {
   if (confirm(`Delete session "${id}"?`)) {
@@ -380,15 +369,24 @@ function selectSession(id: string) {
   if (window.innerWidth < 768) sidebarOpen.value = false
 }
 
+const creating = ref(false)
+
 async function createSession() {
-  if (!newId.value) return
+  if (!newId.value || creating.value) return
+  const isResume = newResume.value
+  creating.value = true
   try {
-    await sessions.create(newId.value, '/workspace', newCli.value)
+    await sessions.create(newId.value, '/workspace', newCli.value, isResume)
     showNewSession.value = false
     newId.value = ''
+    newResume.value = false
+    // Always switch to terminal so user sees CLI loading / resume list
+    mode.value = 'terminal'
   } catch (e: any) {
     console.error('Create session failed:', e)
     alert('Failed to create session: ' + (e.message || e))
+  } finally {
+    creating.value = false
   }
 }
 </script>
@@ -721,6 +719,12 @@ async function createSession() {
               class="h-8 px-2 rounded-lg text-xs bg-surface-800 border border-surface-600 text-surface-500 hover:text-white hover:border-surface-500 transition">
               ↓
             </button>
+            <!-- Stop TTS -->
+            <button v-if="ttsPlaying" @click="stopAudio()"
+              class="h-8 px-3 rounded-lg text-xs bg-ok/10 border border-ok/30 text-ok hover:bg-ok/20 transition flex items-center gap-1.5">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              Stop
+            </button>
             <div class="flex-1" />
             <!-- Recording visualizer in terminal toolbar -->
             <div v-if="isRecording" class="flex items-end gap-px h-5 w-24">
@@ -768,12 +772,26 @@ async function createSession() {
                 <option value="qwen">Qwen Code</option>
               </select>
             </div>
+            <label class="flex items-center gap-2.5 cursor-pointer py-1">
+              <button type="button" @click="newResume = !newResume"
+                :class="['w-9 h-5 rounded-full transition-colors relative flex-shrink-0',
+                  newResume ? 'bg-accent' : 'bg-surface-600']">
+                <span :class="['absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform',
+                  newResume ? 'left-[18px]' : 'left-0.5']" />
+              </button>
+              <span class="text-xs text-surface-400">Resume previous conversation</span>
+            </label>
+            <p v-if="newResume" class="text-[11px] text-surface-600 -mt-1 ml-[46px]">
+              CLI will open its session list — pick the conversation to continue
+            </p>
           </div>
           <div class="flex justify-end gap-2 mt-5">
-            <button @click="showNewSession = false"
-              class="px-4 py-2 rounded-lg text-sm text-surface-500 hover:text-white transition">Cancel</button>
-            <button @click="createSession"
-              class="px-4 py-2 rounded-lg text-sm font-medium text-white bg-accent hover:bg-accent-hover transition">Create</button>
+            <button @click="showNewSession = false" :disabled="creating"
+              class="px-4 py-2 rounded-lg text-sm text-surface-500 hover:text-white transition disabled:opacity-30">Cancel</button>
+            <button @click="createSession" :disabled="creating"
+              class="px-4 py-2 rounded-lg text-sm font-medium text-white bg-accent hover:bg-accent-hover transition disabled:opacity-50">
+              {{ creating ? 'Starting...' : 'Create' }}
+            </button>
           </div>
         </div>
       </div>

@@ -1,157 +1,155 @@
+import time
 from datetime import datetime, timezone
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user
-from app.core.config import settings
-from app.core.security import get_agent_box_token, set_agent_box_token
+from app.core.config import CLI, CLI_COMMANDS, CLI_RESUME_INPUT, settings
+from app.core.parser import parse_terminal_output
+from app.core.tmux import (
+    get_pane_output,
+    list_sessions as tmux_list_sessions,
+    require_session,
+    session_name,
+    session_target,
+    tmux,
+    validate_id,
+    wait_for_ready,
+)
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"], dependencies=[Depends(get_current_user)])
 
-# In-memory tracking
-_activity: dict[str, str | None] = {}  # session_id -> last activity ISO
-_msg_counts: dict[str, int] = {}       # session_id -> last known message count
-_msg_timestamps: dict[str, dict[int, str]] = {}  # session_id -> {msg_index: ISO timestamp}
-
-
-def _touch(session_id: str):
-    _activity[session_id] = datetime.now(timezone.utc).isoformat()
-
-
-async def _ensure_ab_token():
-    token = get_agent_box_token()
-    if token:
-        return token
-    import os
-    login = os.getenv("AB_LOGIN", "admin")
-    password = os.getenv("AB_PASSWORD", "admin123")
-    async with httpx.AsyncClient(timeout=10) as client:
-        try:
-            r = await client.post(
-                f"{settings.AGENT_BOX_URL}/auth/login",
-                json={"login": login, "password": password},
-            )
-            if r.status_code == 200:
-                t = r.json().get("token", "")
-                set_agent_box_token(t)
-                return t
-        except Exception:
-            pass
-    raise HTTPException(502, "Cannot authenticate with Agent Box")
-
-
-async def _headers():
-    token = await _ensure_ab_token()
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-
-@router.get("")
-async def list_sessions():
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.get(f"{settings.AGENT_BOX_URL}/health", headers=await _headers(), timeout=10)
-        except httpx.ConnectError:
-            raise HTTPException(502, "Agent Box unavailable")
-    if r.status_code != 200:
-        raise HTTPException(r.status_code, "Agent Box error")
-    data = r.json()
-    headers = await _headers()
-    sessions_list = []
-    for sid in data.get("sessions", []):
-        if sid not in _activity:
-            _activity[sid] = None
-        sessions_list.append({"id": sid, "last_active": _activity[sid] or ""})
-    sessions_list.sort(key=lambda s: s["last_active"] or "", reverse=True)
-    return {"sessions": sessions_list}
+# In-memory tracking for timestamps
+_msg_counts: dict[str, int] = {}
+_msg_timestamps: dict[str, dict[int, str]] = {}
 
 
 class CreateSession(BaseModel):
     session_id: str
     workdir: str = "/workspace"
-    cli: str = "claude"
+    cli: CLI = CLI.claude
+    resume: bool = False
+
+
+class SendRequest(BaseModel):
+    text: str
+
+
+@router.get("")
+async def list_sessions_endpoint():
+    ids = tmux_list_sessions()
+    return {"sessions": [{"id": sid} for sid in ids]}
 
 
 @router.post("")
-async def create_session(body: CreateSession):
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{settings.AGENT_BOX_URL}/sessions",
-            headers=await _headers(),
-            json=body.model_dump(),
-            timeout=30,
-        )
-    _touch(body.session_id)
-    return r.json()
+async def create_session_endpoint(body: CreateSession):
+    validate_id(body.session_id)
+    name = session_name(body.session_id)
+
+    check = tmux("has-session", "-t", name)
+    if check.returncode == 0:
+        raise HTTPException(status_code=409, detail=f"session '{body.session_id}' already exists")
+
+    proc = tmux("new-session", "-d", "-s", name, "-c", body.workdir)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=500, detail=proc.stderr.strip() or "failed to create session")
+
+    target = session_target(body.session_id)
+    tmux("send-keys", "-t", target, "-l", "--", CLI_COMMANDS[body.cli])
+    tmux("send-keys", "-t", target, "Enter")
+
+    ready = await wait_for_ready(body.session_id, body.cli)
+
+    # Auto-send /resume if requested (only after CLI is ready)
+    if body.resume and ready and body.cli in CLI_RESUME_INPUT:
+        resume_cmd = CLI_RESUME_INPUT[body.cli]
+        tmux("send-keys", "-t", target, "-l", "--", resume_cmd)
+        time.sleep(settings.SEND_ENTER_DELAY)
+        tmux("send-keys", "-t", target, "Enter")
+
+    return {
+        "ok": True,
+        "session_id": body.session_id,
+        "cli": body.cli.value,
+        "status": "ready" if ready else "starting",
+        "resumed": body.resume,
+    }
 
 
 @router.get("/{session_id}/messages")
-async def get_messages(session_id: str):
+async def get_messages_endpoint(session_id: str):
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                f"{settings.AGENT_BOX_URL}/sessions/{session_id}/tail",
-                headers=await _headers(),
-                params={"lines": 500},
-            )
-            if r.status_code == 200:
-                data = r.json()
-                output = data.get("text", "") or data.get("output", "")
-                if output:
-                    from app.core.parser import parse_terminal_output
-                    msgs = parse_terminal_output(output)
-
-                    # Track new messages and assign real timestamps
-                    now = datetime.now(timezone.utc).isoformat()
-                    prev_count = _msg_counts.get(session_id, 0)
-                    cur_count = len(msgs)
-
-                    if session_id not in _msg_timestamps:
-                        _msg_timestamps[session_id] = {}
-
-                    if cur_count > prev_count:
-                        # New messages appeared — stamp them with current time
-                        for idx in range(prev_count, cur_count):
-                            _msg_timestamps[session_id][idx] = now
-                        _msg_counts[session_id] = cur_count
-                        _activity[session_id] = now
-
-                    # Apply stored timestamps to messages
-                    ts_map = _msg_timestamps.get(session_id, {})
-                    for idx, msg in enumerate(msgs):
-                        if idx in ts_map:
-                            msg["timestamp"] = ts_map[idx]
-
-                    return {"messages": msgs}
+        output = get_pane_output(session_id, lines=500)
     except Exception:
-        pass
-    return {"messages": []}
+        return {"messages": []}
+
+    if not output:
+        return {"messages": []}
+
+    msgs = parse_terminal_output(output)
+
+    now = datetime.now(timezone.utc).isoformat()
+    prev_count = _msg_counts.get(session_id, 0)
+    cur_count = len(msgs)
+
+    if session_id not in _msg_timestamps:
+        _msg_timestamps[session_id] = {}
+
+    if cur_count > prev_count:
+        for idx in range(prev_count, cur_count):
+            _msg_timestamps[session_id][idx] = now
+        _msg_counts[session_id] = cur_count
+
+    ts_map = _msg_timestamps.get(session_id, {})
+    for idx, msg in enumerate(msgs):
+        if idx in ts_map:
+            msg["timestamp"] = ts_map[idx]
+
+    return {"messages": msgs}
+
+
+@router.get("/{session_id}/tail")
+def tail(session_id: str, lines: int = 80):
+    require_session(session_id)
+    proc = tmux("capture-pane", "-p", "-t", session_target(session_id), "-S", f"-{lines}")
+    if proc.returncode != 0:
+        raise HTTPException(status_code=500, detail=proc.stderr.strip() or "capture failed")
+    return {"session_id": session_id, "output": proc.stdout}
 
 
 @router.delete("/{session_id}")
-async def delete_session(session_id: str):
-    async with httpx.AsyncClient() as client:
-        r = await client.delete(f"{settings.AGENT_BOX_URL}/sessions/{session_id}", headers=await _headers(), timeout=10)
-    _activity.pop(session_id, None)
-    return r.json()
+def delete_session_endpoint(session_id: str):
+    tmux("kill-session", "-t", session_name(session_id))
+    _msg_counts.pop(session_id, None)
+    _msg_timestamps.pop(session_id, None)
+    return {"ok": True, "session_id": session_id}
 
 
 @router.post("/{session_id}/send")
-async def send_to_session(session_id: str, body: dict):
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{settings.AGENT_BOX_URL}/sessions/{session_id}/send",
-            headers=await _headers(),
-            json=body,
-            timeout=10,
-        )
-    _touch(session_id)
-    return r.json()
+def send(session_id: str, payload: SendRequest):
+    require_session(session_id)
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is empty")
+
+    target = session_target(session_id)
+
+    send_text = tmux("send-keys", "-t", target, "-l", "--", text)
+    if send_text.returncode != 0:
+        raise HTTPException(status_code=500, detail=send_text.stderr.strip() or "send text failed")
+
+    time.sleep(settings.SEND_ENTER_DELAY)
+
+    send_enter = tmux("send-keys", "-t", target, "Enter")
+    if send_enter.returncode != 0:
+        raise HTTPException(status_code=500, detail=send_enter.stderr.strip() or "send enter failed")
+
+    return {"ok": True, "session_id": session_id, "sent": text}
 
 
 @router.post("/{session_id}/interrupt")
-async def interrupt_session(session_id: str):
-    async with httpx.AsyncClient() as client:
-        r = await client.post(f"{settings.AGENT_BOX_URL}/sessions/{session_id}/interrupt", headers=await _headers(), timeout=10)
-    return r.json()
+def interrupt(session_id: str):
+    require_session(session_id)
+    tmux("send-keys", "-t", session_target(session_id), "C-c")
+    return {"ok": True, "session_id": session_id}

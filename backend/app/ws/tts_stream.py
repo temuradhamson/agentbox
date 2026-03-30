@@ -1,57 +1,65 @@
 import asyncio
 
-import websockets
-from fastapi import APIRouter, Query, WebSocket
+from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
-from app.core.agentbox import ensure_ab_token
-from app.core.config import settings
 from app.core.security import verify_token
+from app.core.tts import broadcast_tts_url, extract_tts_url, tts_clients
 
 router = APIRouter()
 
 
+# ── HTTP endpoints ──
+
+class TTSSpeakRequest(BaseModel):
+    url: str
+
+
+@router.post("/api/tts/hook")
+async def tts_hook(request: Request):
+    """Receive raw PostToolUse hook JSON from Claude Code."""
+    try:
+        data = await request.json()
+        url = extract_tts_url(data)
+        if url:
+            await broadcast_tts_url(url)
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@router.post("/api/tts/speak")
+async def tts_speak(payload: TTSSpeakRequest):
+    await broadcast_tts_url(payload.url)
+    return {"ok": True, "delivered": len(tts_clients)}
+
+
+# ── WebSocket endpoint ──
+
 @router.websocket("/ws/tts")
-async def ws_tts_proxy(ws: WebSocket, token: str = Query("")):
+async def ws_tts(ws: WebSocket, token: str = Query("")):
     payload = verify_token(token)
     if not payload:
         await ws.close(code=4001, reason="Unauthorized")
         return
 
-    try:
-        ab_token = await ensure_ab_token()
-    except Exception:
-        await ws.close(code=4002, reason="Agent Box auth failed")
-        return
-
     await ws.accept()
+    tts_clients.add(ws)
 
-    upstream_url = f"{settings.AGENT_BOX_URL.replace('http', 'ws')}/ws/tts?token={ab_token}"
-    try:
-        async with websockets.connect(upstream_url) as upstream:
-
-            async def keepalive():
-                try:
-                    while True:
-                        await asyncio.sleep(25)
-                        await ws.send_text('{"ping":true}')
-                except Exception:
-                    pass
-
-            async def upstream_to_client():
-                try:
-                    async for msg in upstream:
-                        if isinstance(msg, bytes):
-                            await ws.send_bytes(msg)
-                        else:
-                            await ws.send_text(msg)
-                except websockets.ConnectionClosed:
-                    pass
-
-            await asyncio.gather(keepalive(), upstream_to_client())
-    except Exception:
-        pass
-    finally:
+    async def keepalive():
         try:
-            await ws.close()
+            while True:
+                await asyncio.sleep(25)
+                await ws.send_text('{"ping":true}')
         except Exception:
             pass
+
+    try:
+        ka_task = asyncio.create_task(keepalive())
+        while True:
+            await ws.receive_text()  # keep-alive reads
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        ka_task.cancel()
+        tts_clients.discard(ws)

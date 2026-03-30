@@ -2,7 +2,6 @@ import { defineStore } from 'pinia'
 
 export interface SessionInfo {
   id: string
-  last_active: string
 }
 
 export const useSessionsStore = defineStore('sessions', {
@@ -21,11 +20,11 @@ export const useSessionsStore = defineStore('sessions', {
       } catch { this.sessions = [] }
     },
 
-    async create(sessionId: string, workdir: string, cli: string) {
+    async create(sessionId: string, workdir: string, cli: string, resume: boolean = false) {
       const api = useApi()
       this.loading = true
       try {
-        await api.post('/api/sessions', { session_id: sessionId, workdir, cli })
+        await api.post('/api/sessions', { session_id: sessionId, workdir, cli, resume })
         await this.fetch()
         this.setActive(sessionId)
       } finally { this.loading = false }

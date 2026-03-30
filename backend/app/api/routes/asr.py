@@ -1,32 +1,28 @@
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.api.deps import get_current_user
-from app.core.agentbox import ensure_ab_token
 from app.core.config import settings
 
 router = APIRouter(prefix="/api/asr", tags=["asr"], dependencies=[Depends(get_current_user)])
 
 
 @router.post("/transcribe")
-async def transcribe(audio: UploadFile):
-    try:
-        token = await ensure_ab_token()
-    except Exception:
-        raise HTTPException(502, "Agent Box auth failed")
+async def transcribe(audio: UploadFile = File(...)):
+    audio_bytes = await audio.read()
 
-    content = await audio.read()
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(
-                f"{settings.AGENT_BOX_URL}/asr",
-                headers={"Authorization": f"Bearer {token}"},
-                files={"audio": (audio.filename or "recording.wav", content, audio.content_type or "audio/wav")},
-                timeout=None,  # no limit
-            )
-        except httpx.ConnectError:
-            raise HTTPException(502, "Agent Box unavailable")
+    async with httpx.AsyncClient(timeout=600.0, verify=False) as client:
+        resp = await client.post(
+            settings.ASR_API_URL,
+            files={"file": (audio.filename or "audio.wav", audio_bytes, audio.content_type or "audio/wav")},
+            data={
+                "language": settings.ASR_LANGUAGE,
+                "with_normalize": "true" if settings.ASR_NORMALIZE else "false",
+                "token": settings.ASR_TOKEN,
+            },
+        )
 
-    if r.status_code != 200:
-        raise HTTPException(r.status_code, "ASR error")
-    return r.json()
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"ASR error: {resp.text}")
+
+    return resp.json()
