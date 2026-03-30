@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tts": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://tts-mcp.2easy.uz/mcp", "--header", "Authorization:Bearer YOUR_TOKEN_HERE"]
+    }
+  }
+}

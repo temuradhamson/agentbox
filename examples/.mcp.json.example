@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "tts": {
+      "type": "http",
+      "url": "https://tts-mcp.2easy.uz/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN_HERE"
+      }
+    }
+  }
+}
