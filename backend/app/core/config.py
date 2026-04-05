@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     SEND_ENTER_DELAY: float = 0.2
 
     # ASR
-    ASR_API_URL: str = "https://whisper-asr.2dox.uz/qwen/transcribe"
+    ASR_API_URL: str = "https://whisper-asr.2dox.uz/transcribe"
     ASR_TOKEN: str = ""
     ASR_LANGUAGE: str = "ru"
     ASR_NORMALIZE: bool = False
